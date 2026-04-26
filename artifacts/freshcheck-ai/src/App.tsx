@@ -164,79 +164,6 @@ function dayKey(ts: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function lastNDayKeys(n: number): string[] {
-  const arr: string[] = [];
-  const today = new Date();
-  for (let i = n - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    arr.push(
-      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
-    );
-  }
-  return arr;
-}
-
-const FRUIT_EMOJI_MAP: Record<string, string> = {
-  apple: "🍎",
-  banana: "🍌",
-  orange: "🍊",
-  strawberry: "🍓",
-  grape: "🍇",
-  watermelon: "🍉",
-  kiwi: "🥝",
-  peach: "🍑",
-  pineapple: "🍍",
-  mango: "🥭",
-  lemon: "🍋",
-  cherry: "🍒",
-  pear: "🍐",
-  coconut: "🥥",
-  blueberry: "🫐",
-  avocado: "🥑",
-  tomato: "🍅",
-  carrot: "🥕",
-  eggplant: "🍆",
-  broccoli: "🥦",
-  potato: "🥔",
-  corn: "🌽",
-  pepper: "🫑",
-  cucumber: "🥒",
-  onion: "🧅",
-  garlic: "🧄",
-  lettuce: "🥬",
-  mushroom: "🍄",
-};
-
-function produceEmoji(name: string): string {
-  const lower = name.toLowerCase();
-  for (const k of Object.keys(FRUIT_EMOJI_MAP)) {
-    if (lower.includes(k)) return FRUIT_EMOJI_MAP[k];
-  }
-  return "🍽️";
-}
-
-function extractProduceName(label: string): string {
-  // Strip freshness keywords to get the produce name (e.g. "Fresh Apple" -> "Apple")
-  const cleaned = label
-    .replace(
-      /\b(fresh|rotten|spoiled|spoil|bad|good|ripe|unripe|mature|overripe|stale|old|new)\b/gi,
-      "",
-    )
-    .replace(/\s+/g, " ")
-    .trim();
-  return (cleaned || label).toLowerCase();
-}
-
-type ProduceEntry = {
-  name: string;
-  total: number;
-  days: Record<string, number>;
-  // All scan timestamps for this produce (used for hourly drill-down)
-  timestamps: number[];
-  last: number;
-};
-
 function isSameDay(ts: number, ref: Date): boolean {
   const d = new Date(ts);
   return (
@@ -378,20 +305,34 @@ export default function App() {
   const [history, setHistory] = useState<ScanRecord[]>([]);
   const [savedFlash, setSavedFlash] = useState(false);
   const [filter, setFilter] = useState<"all" | ScanCategory>("all");
-  const [nothingToScan, setNothingToScan] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+  const [retention, setRetention] = useState<"forever" | "7d" | "1m">(() => {
     try {
-      return localStorage.getItem("optisort_sidebar_open") === "1";
-    } catch {
-      return false;
-    }
+      const v = localStorage.getItem("freshcheck_retention");
+      if (v === "7d" || v === "1m" || v === "forever") return v;
+    } catch {}
+    return "forever";
   });
+  const [nothingToScan, setNothingToScan] = useState(false);
 
   useEffect(() => {
     try {
-      localStorage.setItem("optisort_sidebar_open", sidebarOpen ? "1" : "0");
+      localStorage.setItem("freshcheck_retention", retention);
     } catch {}
-  }, [sidebarOpen]);
+  }, [retention]);
+
+  // Auto-prune history when the retention window changes (or on initial mount once
+  // history is loaded). Records older than the cutoff are removed entirely.
+  useEffect(() => {
+    if (retention === "forever") return;
+    const cutoff =
+      Date.now() - (retention === "7d" ? 7 : 30) * 24 * 60 * 60 * 1000;
+    setHistory((prev) => {
+      const kept = prev.filter((r) => r.timestamp >= cutoff);
+      if (kept.length === prev.length) return prev;
+      saveHistory(kept);
+      return kept;
+    });
+  }, [retention, history.length]);
 
   const modelRef = useRef<any>(null);
   const mobilenetRef = useRef<any>(null);
@@ -632,14 +573,11 @@ export default function App() {
 
   const exportCSV = () => {
     if (!history.length) return;
-    const header = ["timestamp", "date", "label", "category", "confidence_percent", "source"];
+    const header = ["Timestamp", "Fruit Name", "Confidence Score"];
     const rows = history.map((r) => [
       new Date(r.timestamp).toISOString(),
-      formatTime(r.timestamp),
       r.label,
-      categoryLabel(r.category),
-      (r.confidence * 100).toFixed(1),
-      r.source,
+      `${(r.confidence * 100).toFixed(1)}%`,
     ]);
     const csv = [header, ...rows]
       .map((row) =>
@@ -651,11 +589,12 @@ export default function App() {
           .join(","),
       )
       .join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    // Prepend a UTF-8 BOM so Excel opens emoji/unicode in fruit names cleanly.
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `optisort-history-${dayKey(Date.now())}.csv`;
+    a.download = `freshcheck-history-${dayKey(Date.now())}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -683,36 +622,6 @@ export default function App() {
       .sort((a, b) => (a[0] < b[0] ? 1 : -1))
       .slice(0, 7);
     return { total, fresh, overripe, todayCount, avgConfidence, recentDays };
-  }, [history]);
-
-  const produceBreakdown = useMemo<ProduceEntry[]>(() => {
-    const map: Record<string, ProduceEntry> = {};
-    for (const r of history) {
-      // Prefer the MobileNet-detected produce type; fall back to extracting
-      // from the freshness label for older records, or "unknown" if neither.
-      const fallback = extractProduceName(r.label);
-      const isFreshnessOnly = /^(fresh|rotten|ripe|overripe|nothing|spoiled|good|bad)$/i.test(
-        fallback,
-      );
-      const name =
-        r.produceType || (isFreshnessOnly ? "unknown" : fallback) || "unknown";
-      if (!map[name]) {
-        map[name] = {
-          name,
-          total: 0,
-          days: {},
-          timestamps: [],
-          last: 0,
-        };
-      }
-      const e = map[name];
-      e.total++;
-      const dk = dayKey(r.timestamp);
-      e.days[dk] = (e.days[dk] || 0) + 1;
-      e.timestamps.push(r.timestamp);
-      if (r.timestamp > e.last) e.last = r.timestamp;
-    }
-    return Object.values(map).sort((a, b) => b.total - a.total);
   }, [history]);
 
   const filteredHistory = useMemo(() => {
@@ -754,70 +663,6 @@ export default function App() {
         .pop { animation: pop 0.35s ease-out both; }
       `}</style>
 
-      {/* Collapsible produce-counts sidebar */}
-      <aside
-        aria-hidden={!sidebarOpen}
-        className={`fixed top-0 left-0 h-full z-40 w-80 max-w-[85vw] bg-white/95 backdrop-blur-xl shadow-2xl border-r border-gray-200 overflow-y-auto transform transition-transform duration-300 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
-      >
-        <div className="sticky top-0 bg-white/95 backdrop-blur p-4 border-b border-gray-100 flex items-center justify-between z-10">
-          <div>
-            <h3 className="font-bold text-gray-900 text-lg">Produce Counts</h3>
-            <p className="text-xs text-gray-500">Auto-tracked from your scans</p>
-          </div>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-600"
-            aria-label="Close sidebar"
-          >
-            ✕
-          </button>
-        </div>
-        <div className="p-4 space-y-3">
-          {produceBreakdown.length === 0 ? (
-            <div className="text-center py-10 text-gray-500">
-              <div className="text-4xl mb-2" aria-hidden>
-                🥗
-              </div>
-              <p className="text-sm font-medium">No produce yet</p>
-              <p className="text-xs mt-1">
-                Scan a fruit or vegetable and it'll show up here automatically.
-              </p>
-            </div>
-          ) : (
-            produceBreakdown.map((p) => <ProduceCard key={p.name} produce={p} />)
-          )}
-        </div>
-      </aside>
-
-      {/* Mobile backdrop */}
-      {sidebarOpen && (
-        <button
-          onClick={() => setSidebarOpen(false)}
-          aria-label="Close sidebar"
-          className="lg:hidden fixed inset-0 bg-black/40 z-30"
-        />
-      )}
-
-      {/* Sidebar toggle */}
-      <button
-        onClick={() => setSidebarOpen((v) => !v)}
-        className={`fixed top-4 z-50 inline-flex items-center gap-2 bg-white shadow-lg border border-gray-200 px-3 py-2 rounded-xl font-semibold text-sm text-gray-700 hover:bg-emerald-50 hover:border-emerald-300 transition-all ${sidebarOpen ? "left-[calc(20rem+1rem)] max-[680px]:left-[calc(85vw+0.5rem)]" : "left-4"}`}
-        aria-label="Toggle produce counts sidebar"
-        aria-expanded={sidebarOpen}
-      >
-        <span className="text-lg" aria-hidden>
-          {sidebarOpen ? "✕" : "📊"}
-        </span>
-        <span className="hidden sm:inline">
-          {sidebarOpen ? "Hide" : "Counts"}
-        </span>
-        {!sidebarOpen && produceBreakdown.length > 0 && (
-          <span className="ml-1 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-emerald-600 text-white text-xs font-bold">
-            {produceBreakdown.length}
-          </span>
-        )}
-      </button>
-
       <div className="min-h-screen flex flex-col items-center px-4 py-6 sm:py-10">
         {/* Header */}
         <header className="w-full max-w-4xl text-center mb-6 sm:mb-8 fade-up">
@@ -827,7 +672,7 @@ export default function App() {
           </div>
           <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight">
             <span className="bg-gradient-to-r from-emerald-600 via-orange-500 to-rose-500 bg-clip-text text-transparent">
-              OptiSort
+              FreshCheck
             </span>{" "}
             <span className="text-gray-900">AI</span>
           </h1>
@@ -1069,20 +914,41 @@ export default function App() {
 
         {/* History */}
         <section className="w-full max-w-4xl mt-6 bg-white/85 backdrop-blur-xl rounded-3xl shadow-xl border border-white p-5 sm:p-8 fade-up">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
             <div>
               <h2 className="text-xl sm:text-2xl font-bold text-gray-900">Scan History</h2>
               <p className="text-xs text-gray-500 mt-0.5">
                 Stored locally on this device — use as your scan log and backup.
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="inline-flex items-center gap-2 bg-white border border-gray-200 rounded-lg pl-3 pr-1 py-1.5 text-sm text-gray-700 shadow-sm">
+                <span className="text-xs font-semibold text-gray-500 hidden sm:inline" aria-hidden>
+                  ⏱ Keep:
+                </span>
+                <span className="text-xs font-semibold text-gray-500 sm:hidden" aria-hidden>
+                  ⏱
+                </span>
+                <select
+                  value={retention}
+                  onChange={(e) =>
+                    setRetention(e.target.value as "forever" | "7d" | "1m")
+                  }
+                  className="bg-transparent text-sm font-semibold text-gray-800 focus:outline-none cursor-pointer pr-1"
+                  aria-label="Data retention period"
+                >
+                  <option value="forever">Keep Forever</option>
+                  <option value="7d">Auto-delete older than 7 days</option>
+                  <option value="1m">Auto-delete older than 1 month</option>
+                </select>
+              </label>
               <button
                 onClick={exportCSV}
                 disabled={!history.length}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-900 hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold shadow-md transition-all active:scale-[0.98]"
+                title="Download scan history as a CSV file"
               >
-                <span aria-hidden>⬇</span> Export CSV
+                <span aria-hidden>⬇</span> Export to CSV
               </button>
               <button
                 onClick={clearHistory}
@@ -1193,233 +1059,10 @@ export default function App() {
           <p>
             Built with TensorFlow.js + Teachable Machine. History is saved on this device only.
           </p>
-          <p className="text-gray-400">OptiSort is AI and can make mistakes.</p>
+          <p className="text-gray-400">FreshCheck is AI and can make mistakes.</p>
         </footer>
       </div>
     </>
-  );
-}
-
-function HourlyLineChart({
-  hourly,
-  dayLabel,
-}: {
-  hourly: number[];
-  dayLabel: string;
-}) {
-  const W = 280;
-  const H = 110;
-  const padL = 24;
-  const padR = 8;
-  const padT = 10;
-  const padB = 22;
-  const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
-  const max = Math.max(1, ...hourly);
-  const points = hourly.map((c, i) => {
-    const x = padL + (i / 23) * innerW;
-    const y = padT + innerH - (c / max) * innerH;
-    return [x, y] as const;
-  });
-  const path = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x},${y}`).join(" ");
-  const area = `${path} L${padL + innerW},${padT + innerH} L${padL},${padT + innerH} Z`;
-  // y-axis ticks (0, mid, max)
-  const yTicks = [0, Math.ceil(max / 2), max];
-  return (
-    <div>
-      <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-1">
-        {dayLabel} · scans by hour
-      </p>
-      <div className="bg-white rounded-lg border border-gray-200 p-2">
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
-          {/* grid lines */}
-          {yTicks.map((t) => {
-            const y = padT + innerH - (t / max) * innerH;
-            return (
-              <g key={t}>
-                <line
-                  x1={padL}
-                  y1={y}
-                  x2={W - padR}
-                  y2={y}
-                  stroke="#e5e7eb"
-                  strokeDasharray="2 3"
-                />
-                <text
-                  x={padL - 4}
-                  y={y + 3}
-                  textAnchor="end"
-                  fontSize="9"
-                  fill="#9ca3af"
-                >
-                  {t}
-                </text>
-              </g>
-            );
-          })}
-          {/* x-axis labels (every 4 hours) */}
-          {[0, 4, 8, 12, 16, 20].map((h) => {
-            const x = padL + (h / 23) * innerW;
-            return (
-              <text
-                key={h}
-                x={x}
-                y={H - 6}
-                textAnchor="middle"
-                fontSize="9"
-                fill="#9ca3af"
-              >
-                {h.toString().padStart(2, "0")}
-              </text>
-            );
-          })}
-          {/* area + line */}
-          <path d={area} fill="rgba(16, 185, 129, 0.15)" />
-          <path
-            d={path}
-            fill="none"
-            stroke="#16a34a"
-            strokeWidth="2"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
-          {/* points */}
-          {points.map(([x, y], i) =>
-            hourly[i] > 0 ? (
-              <circle key={i} cx={x} cy={y} r="2.5" fill="#16a34a">
-                <title>{`${i.toString().padStart(2, "0")}:00 — ${hourly[i]} scan${hourly[i] === 1 ? "" : "s"}`}</title>
-              </circle>
-            ) : null,
-          )}
-        </svg>
-      </div>
-    </div>
-  );
-}
-
-function ProduceCard({ produce }: { produce: ProduceEntry }) {
-  const [expanded, setExpanded] = useState(false);
-  const [selectedDay, setSelectedDay] = useState<string | null>(null);
-
-  const last7 = lastNDayKeys(7).map((d) => ({
-    day: d,
-    count: produce.days[d] || 0,
-  }));
-  const maxDay = Math.max(1, ...last7.map((d) => d.count));
-
-  const hourly = useMemo<number[]>(() => {
-    if (!selectedDay) return [];
-    const buckets = new Array(24).fill(0);
-    for (const ts of produce.timestamps) {
-      if (dayKey(ts) === selectedDay) {
-        buckets[new Date(ts).getHours()]++;
-      }
-    }
-    return buckets;
-  }, [selectedDay, produce.timestamps]);
-
-  const dayLabel = selectedDay
-    ? new Date(selectedDay + "T00:00:00").toLocaleDateString(undefined, {
-        weekday: "short",
-        month: "short",
-        day: "numeric",
-      })
-    : "";
-
-  return (
-    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full p-3 flex items-center gap-3 hover:bg-gray-50 transition-colors text-left"
-        aria-expanded={expanded}
-      >
-        <span className="text-3xl flex-shrink-0" aria-hidden>
-          {produceEmoji(produce.name)}
-        </span>
-        <div className="flex-1 min-w-0">
-          <p className="font-semibold text-gray-900 truncate capitalize">
-            {produce.name}
-          </p>
-          <p className="text-xs text-gray-500 mt-0.5">
-            {produce.total} scan{produce.total === 1 ? "" : "s"} ·{" "}
-            {Object.keys(produce.days).length} day
-            {Object.keys(produce.days).length === 1 ? "" : "s"}
-          </p>
-        </div>
-        <div className="text-right flex-shrink-0">
-          <p className="text-2xl font-extrabold text-gray-900 tabular-nums leading-none">
-            {produce.total}
-          </p>
-          <p className="text-xs text-gray-400 mt-1">{expanded ? "▲" : "▼"}</p>
-        </div>
-      </button>
-      {expanded && (
-        <div className="p-3 border-t border-gray-100 bg-gray-50/60 space-y-3">
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500">
-                Last 7 days
-              </p>
-              <p className="text-[10px] text-gray-400 italic">tap a bar</p>
-            </div>
-            <div className="flex items-end gap-1 h-24">
-              {last7.map((d) => {
-                const isSelected = selectedDay === d.day;
-                const isToday = d.day === dayKey(Date.now());
-                return (
-                  <button
-                    key={d.day}
-                    onClick={() =>
-                      setSelectedDay((cur) =>
-                        cur === d.day ? null : d.count > 0 ? d.day : cur,
-                      )
-                    }
-                    disabled={d.count === 0}
-                    className={`flex-1 flex flex-col items-center gap-1 min-w-0 rounded transition-all ${
-                      d.count > 0
-                        ? "cursor-pointer hover:opacity-80"
-                        : "cursor-not-allowed opacity-60"
-                    }`}
-                    title={`${d.day}: ${d.count} scan${d.count === 1 ? "" : "s"}`}
-                  >
-                    <span className="text-[10px] font-bold text-gray-700 tabular-nums h-3">
-                      {d.count || ""}
-                    </span>
-                    <div className="w-full flex items-end h-14 bg-white rounded-sm border border-gray-200">
-                      <div
-                        className={`w-full rounded-sm transition-all ${
-                          isSelected
-                            ? "bg-gradient-to-t from-emerald-700 to-emerald-500 ring-2 ring-emerald-300"
-                            : "bg-gradient-to-t from-emerald-500 to-emerald-400"
-                        }`}
-                        style={{
-                          height: `${Math.max(d.count > 0 ? 8 : 0, (d.count / maxDay) * 100)}%`,
-                        }}
-                      />
-                    </div>
-                    <span
-                      className={`text-[10px] tabular-nums ${isToday ? "font-bold text-emerald-700" : "text-gray-500"}`}
-                    >
-                      {d.day.slice(8)}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {selectedDay && (
-            <div className="fade-up">
-              <HourlyLineChart hourly={hourly} dayLabel={dayLabel} />
-            </div>
-          )}
-
-          <p className="text-[10px] text-gray-500 text-center pt-1">
-            Last scan: {formatTime(produce.last)}
-          </p>
-        </div>
-      )}
-    </div>
   );
 }
 
