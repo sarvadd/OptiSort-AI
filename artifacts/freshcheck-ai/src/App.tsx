@@ -74,6 +74,91 @@ function dayKey(ts: number): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function lastNDayKeys(n: number): string[] {
+  const arr: string[] = [];
+  const today = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    arr.push(
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`,
+    );
+  }
+  return arr;
+}
+
+const TIME_BUCKETS = ["Morning", "Afternoon", "Evening", "Night"] as const;
+type TimeBucket = (typeof TIME_BUCKETS)[number];
+
+function timeBucket(ts: number): TimeBucket {
+  const h = new Date(ts).getHours();
+  if (h >= 6 && h < 12) return "Morning";
+  if (h >= 12 && h < 17) return "Afternoon";
+  if (h >= 17 && h < 21) return "Evening";
+  return "Night";
+}
+
+const FRUIT_EMOJI_MAP: Record<string, string> = {
+  apple: "🍎",
+  banana: "🍌",
+  orange: "🍊",
+  strawberry: "🍓",
+  grape: "🍇",
+  watermelon: "🍉",
+  kiwi: "🥝",
+  peach: "🍑",
+  pineapple: "🍍",
+  mango: "🥭",
+  lemon: "🍋",
+  cherry: "🍒",
+  pear: "🍐",
+  coconut: "🥥",
+  blueberry: "🫐",
+  avocado: "🥑",
+  tomato: "🍅",
+  carrot: "🥕",
+  eggplant: "🍆",
+  broccoli: "🥦",
+  potato: "🥔",
+  corn: "🌽",
+  pepper: "🫑",
+  cucumber: "🥒",
+  onion: "🧅",
+  garlic: "🧄",
+  lettuce: "🥬",
+  mushroom: "🍄",
+};
+
+function produceEmoji(name: string): string {
+  const lower = name.toLowerCase();
+  for (const k of Object.keys(FRUIT_EMOJI_MAP)) {
+    if (lower.includes(k)) return FRUIT_EMOJI_MAP[k];
+  }
+  return "🍽️";
+}
+
+function extractProduceName(label: string): string {
+  // Strip freshness keywords to get the produce name (e.g. "Fresh Apple" -> "Apple")
+  const cleaned = label
+    .replace(
+      /\b(fresh|rotten|spoiled|spoil|bad|good|ripe|unripe|mature|overripe|stale|old|new)\b/gi,
+      "",
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+  return (cleaned || label).toLowerCase();
+}
+
+type ProduceEntry = {
+  name: string;
+  total: number;
+  fresh: number;
+  overripe: number;
+  days: Record<string, number>;
+  times: Record<TimeBucket, number>;
+  last: number;
+};
+
 function isSameDay(ts: number, ref: Date): boolean {
   const d = new Date(ts);
   return (
@@ -216,6 +301,19 @@ export default function App() {
   const [savedFlash, setSavedFlash] = useState(false);
   const [filter, setFilter] = useState<"all" | ScanCategory>("all");
   const [nothingToScan, setNothingToScan] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("optisort_sidebar_open") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("optisort_sidebar_open", sidebarOpen ? "1" : "0");
+    } catch {}
+  }, [sidebarOpen]);
 
   const modelRef = useRef<any>(null);
   const webcamRef = useRef<any>(null);
@@ -485,6 +583,33 @@ export default function App() {
     return { total, fresh, overripe, todayCount, avgConfidence, recentDays };
   }, [history]);
 
+  const produceBreakdown = useMemo<ProduceEntry[]>(() => {
+    const map: Record<string, ProduceEntry> = {};
+    for (const r of history) {
+      const name = extractProduceName(r.label) || "unknown";
+      if (!map[name]) {
+        map[name] = {
+          name,
+          total: 0,
+          fresh: 0,
+          overripe: 0,
+          days: {},
+          times: { Morning: 0, Afternoon: 0, Evening: 0, Night: 0 },
+          last: 0,
+        };
+      }
+      const e = map[name];
+      e.total++;
+      if (r.category === "fresh") e.fresh++;
+      else e.overripe++;
+      const dk = dayKey(r.timestamp);
+      e.days[dk] = (e.days[dk] || 0) + 1;
+      e.times[timeBucket(r.timestamp)]++;
+      if (r.timestamp > e.last) e.last = r.timestamp;
+    }
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [history]);
+
   const filteredHistory = useMemo(() => {
     if (filter === "all") return history;
     return history.filter((r) => r.category === filter);
@@ -523,6 +648,70 @@ export default function App() {
         .fade-up { animation: fadeUp 0.4s ease-out both; }
         .pop { animation: pop 0.35s ease-out both; }
       `}</style>
+
+      {/* Collapsible produce-counts sidebar */}
+      <aside
+        aria-hidden={!sidebarOpen}
+        className={`fixed top-0 left-0 h-full z-40 w-80 max-w-[85vw] bg-white/95 backdrop-blur-xl shadow-2xl border-r border-gray-200 overflow-y-auto transform transition-transform duration-300 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}
+      >
+        <div className="sticky top-0 bg-white/95 backdrop-blur p-4 border-b border-gray-100 flex items-center justify-between z-10">
+          <div>
+            <h3 className="font-bold text-gray-900 text-lg">Produce Counts</h3>
+            <p className="text-xs text-gray-500">Auto-tracked from your scans</p>
+          </div>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-600"
+            aria-label="Close sidebar"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="p-4 space-y-3">
+          {produceBreakdown.length === 0 ? (
+            <div className="text-center py-10 text-gray-500">
+              <div className="text-4xl mb-2" aria-hidden>
+                🥗
+              </div>
+              <p className="text-sm font-medium">No produce yet</p>
+              <p className="text-xs mt-1">
+                Scan a fruit or vegetable and it'll show up here automatically.
+              </p>
+            </div>
+          ) : (
+            produceBreakdown.map((p) => <ProduceCard key={p.name} produce={p} />)
+          )}
+        </div>
+      </aside>
+
+      {/* Mobile backdrop */}
+      {sidebarOpen && (
+        <button
+          onClick={() => setSidebarOpen(false)}
+          aria-label="Close sidebar"
+          className="lg:hidden fixed inset-0 bg-black/40 z-30"
+        />
+      )}
+
+      {/* Sidebar toggle */}
+      <button
+        onClick={() => setSidebarOpen((v) => !v)}
+        className={`fixed top-4 z-50 inline-flex items-center gap-2 bg-white shadow-lg border border-gray-200 px-3 py-2 rounded-xl font-semibold text-sm text-gray-700 hover:bg-emerald-50 hover:border-emerald-300 transition-all ${sidebarOpen ? "left-[calc(20rem+1rem)] max-[680px]:left-[calc(85vw+0.5rem)]" : "left-4"}`}
+        aria-label="Toggle produce counts sidebar"
+        aria-expanded={sidebarOpen}
+      >
+        <span className="text-lg" aria-hidden>
+          {sidebarOpen ? "✕" : "📊"}
+        </span>
+        <span className="hidden sm:inline">
+          {sidebarOpen ? "Hide" : "Counts"}
+        </span>
+        {!sidebarOpen && produceBreakdown.length > 0 && (
+          <span className="ml-1 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-emerald-600 text-white text-xs font-bold">
+            {produceBreakdown.length}
+          </span>
+        )}
+      </button>
 
       <div className="min-h-screen flex flex-col items-center px-4 py-6 sm:py-10">
         {/* Header */}
@@ -903,6 +1092,111 @@ export default function App() {
         </footer>
       </div>
     </>
+  );
+}
+
+function ProduceCard({ produce }: { produce: ProduceEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  const last7 = lastNDayKeys(7).map((d) => ({
+    day: d,
+    count: produce.days[d] || 0,
+  }));
+  const maxDay = Math.max(1, ...last7.map((d) => d.count));
+  const maxTime = Math.max(1, ...TIME_BUCKETS.map((t) => produce.times[t] || 0));
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full p-3 flex items-center gap-3 hover:bg-gray-50 transition-colors text-left"
+        aria-expanded={expanded}
+      >
+        <span className="text-3xl flex-shrink-0" aria-hidden>
+          {produceEmoji(produce.name)}
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="font-semibold text-gray-900 truncate capitalize">
+            {produce.name}
+          </p>
+          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-bold">
+              {produce.fresh} fresh
+            </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-bold">
+              {produce.overripe} discard
+            </span>
+          </div>
+        </div>
+        <div className="text-right flex-shrink-0">
+          <p className="text-2xl font-extrabold text-gray-900 tabular-nums leading-none">
+            {produce.total}
+          </p>
+          <p className="text-xs text-gray-400 mt-1">{expanded ? "▲" : "▼"}</p>
+        </div>
+      </button>
+      {expanded && (
+        <div className="p-3 border-t border-gray-100 bg-gray-50/60 space-y-4">
+          <div>
+            <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">
+              Last 7 days
+            </p>
+            <div className="flex items-end gap-1 h-20">
+              {last7.map((d) => (
+                <div
+                  key={d.day}
+                  className="flex-1 flex flex-col items-center gap-1 min-w-0"
+                  title={`${d.day}: ${d.count}`}
+                >
+                  <span className="text-[10px] font-bold text-gray-700 tabular-nums">
+                    {d.count || ""}
+                  </span>
+                  <div className="w-full flex items-end h-12 bg-white rounded-sm">
+                    <div
+                      className="w-full rounded-sm bg-gradient-to-t from-emerald-500 to-emerald-400"
+                      style={{
+                        height: `${Math.max(d.count > 0 ? 8 : 0, (d.count / maxDay) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-gray-500 tabular-nums">
+                    {d.day.slice(8)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">
+              Time of day
+            </p>
+            <div className="space-y-1.5">
+              {TIME_BUCKETS.map((t) => {
+                const c = produce.times[t] || 0;
+                return (
+                  <div key={t} className="flex items-center gap-2">
+                    <span className="text-xs text-gray-600 w-20 flex-shrink-0">
+                      {t}
+                    </span>
+                    <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-orange-400 to-orange-500 rounded-full transition-all"
+                        style={{ width: `${(c / maxTime) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-xs font-bold text-gray-700 w-6 text-right tabular-nums">
+                      {c}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <p className="text-[10px] text-gray-500 text-center pt-1">
+            Last scan: {formatTime(produce.last)}
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 
