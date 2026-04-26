@@ -9,6 +9,7 @@ declare global {
 const MODEL_URL = "https://teachablemachine.withgoogle.com/models/Nc5P3SYBJ/";
 const HISTORY_KEY = "freshcheck_history_v1";
 const MAX_HISTORY = 200;
+const CONFIDENCE_THRESHOLD = 0.6;
 
 type Prediction = {
   className: string;
@@ -23,7 +24,7 @@ type Status =
   | "image-loaded"
   | "error";
 
-type ScanCategory = "fresh" | "ripe" | "rotten" | "other";
+type ScanCategory = "fresh" | "overripe-discard";
 
 type ScanRecord = {
   id: string;
@@ -39,33 +40,23 @@ const FRUIT_ICONS = ["🍎", "🍊", "🍌", "🍓", "🍇", "🍉", "🥝", "�
 
 function categorize(label: string): ScanCategory {
   const lower = label.toLowerCase();
-  if (lower.includes("rotten") || lower.includes("spoil") || lower.includes("bad"))
-    return "rotten";
-  if (lower.includes("ripe") || lower.includes("mature")) return "ripe";
   if (lower.includes("fresh") || lower.includes("good") || lower.includes("unripe"))
     return "fresh";
-  return "other";
+  return "overripe-discard";
 }
 
-function getExplanation(label: string, confidence: number): string {
-  if (confidence < 0.6) {
-    return "The model isn't confident about this image. Try a clearer, well-lit photo of a single fruit.";
-  }
-  const cat = categorize(label);
-  if (cat === "rotten")
-    return "This fruit looks spoiled. Mark it as discard — it's not safe to sell or eat.";
-  if (cat === "ripe")
-    return "This fruit is perfectly ripe — move it to the front for quick sale.";
+function categoryLabel(cat: ScanCategory): string {
+  return cat === "fresh" ? "Fresh" : "Overripe/Discard";
+}
+
+function getExplanation(cat: ScanCategory): string {
   if (cat === "fresh")
     return "This fruit looks fresh and ready to stock. A great healthy choice!";
-  return "Detection complete. Check the result above.";
+  return "This fruit is past its prime. Mark it for discard or quick clearance.";
 }
 
 function categoryColor(cat: ScanCategory): string {
-  if (cat === "rotten") return "#ef4444";
-  if (cat === "ripe") return "#f97316";
-  if (cat === "fresh") return "#16a34a";
-  return "#6366f1";
+  return cat === "fresh" ? "#16a34a" : "#ef4444";
 }
 
 function formatTime(ts: number): string {
@@ -98,7 +89,12 @@ function loadHistory(): ScanRecord[] {
     if (!raw) return [];
     const arr = JSON.parse(raw);
     if (!Array.isArray(arr)) return [];
-    return arr;
+    // Migrate older records (had "ripe" / "rotten" / "other" categories)
+    return arr.map((r: any) => ({
+      ...r,
+      category:
+        r.category === "fresh" ? "fresh" : "overripe-discard",
+    }));
   } catch {
     return [];
   }
@@ -120,7 +116,6 @@ function makeThumbnail(source: HTMLCanvasElement | HTMLImageElement): string {
   c.height = H;
   const ctx = c.getContext("2d");
   if (!ctx) return "";
-  // cover-fit
   let sw = (source as any).width;
   let sh = (source as any).height;
   if (source instanceof HTMLImageElement) {
@@ -134,6 +129,64 @@ function makeThumbnail(source: HTMLCanvasElement | HTMLImageElement): string {
   const dy = (H - dh) / 2;
   ctx.drawImage(source, dx, dy, dw, dh);
   return c.toDataURL("image/jpeg", 0.7);
+}
+
+// Sample the image and decide if it's a blank/uniform background (white wall, black, etc.)
+// Returns { blank, skinHeavy } so we can decide whether to skip prediction.
+function analyzeFrame(
+  source: HTMLCanvasElement | HTMLImageElement,
+): { blank: boolean; skinHeavy: boolean } {
+  const W = 48;
+  const H = 48;
+  const c = document.createElement("canvas");
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext("2d");
+  if (!ctx) return { blank: false, skinHeavy: false };
+  try {
+    ctx.drawImage(source, 0, 0, W, H);
+  } catch {
+    return { blank: false, skinHeavy: false };
+  }
+  let data: Uint8ClampedArray;
+  try {
+    data = ctx.getImageData(0, 0, W, H).data;
+  } catch {
+    return { blank: false, skinHeavy: false };
+  }
+  let sum = 0;
+  let sumSq = 0;
+  let n = 0;
+  let skin = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    sum += lum;
+    sumSq += lum * lum;
+    n++;
+    // Loose skin-tone heuristic
+    if (
+      r > 95 &&
+      g > 40 &&
+      b > 20 &&
+      r > g &&
+      r > b &&
+      r - Math.min(g, b) > 15 &&
+      Math.abs(r - g) > 10
+    ) {
+      skin++;
+    }
+  }
+  const mean = sum / n;
+  const variance = Math.max(0, sumSq / n - mean * mean);
+  const stddev = Math.sqrt(variance);
+  // Uniform / blank: very low contrast across the frame.
+  const blank = stddev < 14;
+  // Skin-heavy: more than ~55% of pixels look like skin tones (likely just a person)
+  const skinHeavy = skin / n > 0.55;
+  return { blank, skinHeavy };
 }
 
 function FruitIconStrip() {
@@ -162,6 +215,7 @@ export default function App() {
   const [history, setHistory] = useState<ScanRecord[]>([]);
   const [savedFlash, setSavedFlash] = useState(false);
   const [filter, setFilter] = useState<"all" | ScanCategory>("all");
+  const [nothingToScan, setNothingToScan] = useState(false);
 
   const modelRef = useRef<any>(null);
   const webcamRef = useRef<any>(null);
@@ -171,12 +225,10 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastUploadAutoSaved = useRef<string | null>(null);
 
-  // Load history on mount
   useEffect(() => {
     setHistory(loadHistory());
   }, []);
 
-  // Wait for TM library, then load the model
   useEffect(() => {
     let cancelled = false;
     const waitForLibs = async () => {
@@ -230,6 +282,7 @@ export default function App() {
     setErrorMsg("");
     setUploadPreview(null);
     setPredictions([]);
+    setNothingToScan(false);
     try {
       const flip = true;
       const webcam = new window.tmImage.Webcam(360, 360, flip);
@@ -245,7 +298,16 @@ export default function App() {
       const loop = async () => {
         if (!webcamRef.current) return;
         webcamRef.current.update();
-        const preds = await modelRef.current.predict(webcamRef.current.canvas);
+        const frame = analyzeFrame(webcamRef.current.canvas);
+        const preds: Prediction[] = await modelRef.current.predict(
+          webcamRef.current.canvas,
+        );
+        const sorted = [...preds].sort((a, b) => b.probability - a.probability);
+        const top = sorted[0];
+        // Decide if there's a fruit in frame
+        const lowConfidence = !top || top.probability < CONFIDENCE_THRESHOLD;
+        const empty = frame.blank || (frame.skinHeavy && lowConfidence) || lowConfidence;
+        setNothingToScan(empty);
         setPredictions(preds);
         animationRef.current = requestAnimationFrame(loop);
       };
@@ -270,6 +332,7 @@ export default function App() {
     }
     if (webcamContainerRef.current) webcamContainerRef.current.innerHTML = "";
     setCameraActive(false);
+    setNothingToScan(false);
     setStatus("ready");
   };
 
@@ -283,15 +346,23 @@ export default function App() {
       setUploadPreview(dataUrl);
       setStatus("image-loaded");
       setPredictions([]);
+      setNothingToScan(false);
       setTimeout(async () => {
         if (uploadImgRef.current) {
           try {
-            const preds = await modelRef.current.predict(uploadImgRef.current);
-            setPredictions(preds);
-            // Auto-save uploads to history
+            const frame = analyzeFrame(uploadImgRef.current);
+            const preds: Prediction[] = await modelRef.current.predict(
+              uploadImgRef.current,
+            );
             const sorted = [...preds].sort((a, b) => b.probability - a.probability);
             const top = sorted[0];
-            if (top && lastUploadAutoSaved.current !== dataUrl) {
+            const lowConfidence = !top || top.probability < CONFIDENCE_THRESHOLD;
+            const empty =
+              frame.blank || (frame.skinHeavy && lowConfidence) || lowConfidence;
+            setPredictions(preds);
+            setNothingToScan(empty);
+            // Auto-save uploads to history (only if a real fruit was detected)
+            if (!empty && top && lastUploadAutoSaved.current !== dataUrl) {
               lastUploadAutoSaved.current = dataUrl;
               const thumb = makeThumbnail(uploadImgRef.current);
               saveScan(top, thumb, "upload");
@@ -336,7 +407,7 @@ export default function App() {
   };
 
   const captureFromCamera = () => {
-    if (!webcamRef.current) return;
+    if (!webcamRef.current || nothingToScan) return;
     const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
     const top = sorted[0];
     if (!top) return;
@@ -366,7 +437,7 @@ export default function App() {
       new Date(r.timestamp).toISOString(),
       formatTime(r.timestamp),
       r.label,
-      r.category,
+      categoryLabel(r.category),
       (r.confidence * 100).toFixed(1),
       r.source,
     ]);
@@ -384,28 +455,23 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `freshcheck-history-${dayKey(Date.now())}.csv`;
+    a.download = `optisort-history-${dayKey(Date.now())}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
-  // Stats
   const stats = useMemo(() => {
     const today = new Date();
-    let fresh = 0,
-      ripe = 0,
-      rotten = 0,
-      other = 0,
-      todayCount = 0,
-      confidenceSum = 0;
+    let fresh = 0;
+    let overripe = 0;
+    let todayCount = 0;
+    let confidenceSum = 0;
     const byDay: Record<string, number> = {};
     for (const r of history) {
       if (r.category === "fresh") fresh++;
-      else if (r.category === "ripe") ripe++;
-      else if (r.category === "rotten") rotten++;
-      else other++;
+      else overripe++;
       if (isSameDay(r.timestamp, today)) todayCount++;
       confidenceSum += r.confidence;
       const k = dayKey(r.timestamp);
@@ -416,7 +482,7 @@ export default function App() {
     const recentDays = Object.entries(byDay)
       .sort((a, b) => (a[0] < b[0] ? 1 : -1))
       .slice(0, 7);
-    return { total, fresh, ripe, rotten, other, todayCount, avgConfidence, recentDays };
+    return { total, fresh, overripe, todayCount, avgConfidence, recentDays };
   }, [history]);
 
   const filteredHistory = useMemo(() => {
@@ -431,6 +497,7 @@ export default function App() {
   const isModelReady =
     status === "ready" || status === "camera-on" || status === "image-loaded";
   const showLoading = status === "loading-libs" || status === "loading-model";
+  const showResult = !!top && !nothingToScan;
 
   return (
     <>
@@ -466,7 +533,7 @@ export default function App() {
           </div>
           <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight">
             <span className="bg-gradient-to-r from-emerald-600 via-orange-500 to-rose-500 bg-clip-text text-transparent">
-              FreshCheck
+              OptiSort
             </span>{" "}
             <span className="text-gray-900">AI</span>
           </h1>
@@ -556,7 +623,7 @@ export default function App() {
                   <>
                     <button
                       onClick={captureFromCamera}
-                      disabled={!top}
+                      disabled={!top || nothingToScan}
                       className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98] transition-all text-white font-semibold shadow-md"
                     >
                       <span aria-hidden>💾</span> Capture & Save
@@ -586,8 +653,23 @@ export default function App() {
                 />
               </div>
 
+              {/* Nothing to scan */}
+              {nothingToScan && (cameraActive || uploadPreview) && (
+                <div className="mt-7 max-w-md mx-auto fade-up text-center">
+                  <p className="text-xs uppercase tracking-widest text-gray-500 font-semibold">
+                    Result
+                  </p>
+                  <p className="text-3xl sm:text-4xl font-extrabold mt-1 text-gray-500">
+                    Nothing to scan 🫥
+                  </p>
+                  <div className="mt-4 bg-gray-50 border border-gray-200 rounded-2xl p-4 text-sm text-gray-600">
+                    Point the camera at a fruit, or upload an image with a clear fruit in frame. Empty backgrounds and people-only photos are skipped.
+                  </div>
+                </div>
+              )}
+
               {/* Results */}
-              {top && (
+              {showResult && (
                 <div className="mt-7 fade-up">
                   <div className="text-center mb-4">
                     <p className="text-xs uppercase tracking-widest text-gray-500 font-semibold">
@@ -597,10 +679,17 @@ export default function App() {
                       className="text-3xl sm:text-4xl font-extrabold mt-1"
                       style={{ color: categoryColor(categorize(top.className)) }}
                     >
-                      {top.probability < 0.6 ? "Not Sure 🤔" : top.className}
+                      {top.className}
                     </p>
                     <p className="mt-1 text-gray-600 text-sm">
-                      Confidence:{" "}
+                      Category:{" "}
+                      <span
+                        className="font-bold"
+                        style={{ color: categoryColor(categorize(top.className)) }}
+                      >
+                        {categoryLabel(categorize(top.className))}
+                      </span>{" "}
+                      · Confidence:{" "}
                       <span className="font-bold">
                         {(top.probability * 100).toFixed(1)}%
                       </span>
@@ -628,7 +717,7 @@ export default function App() {
                   </div>
 
                   <div className="mt-5 max-w-md mx-auto bg-emerald-50/70 border border-emerald-100 rounded-2xl p-4 text-sm text-gray-700 text-center">
-                    {getExplanation(top.className, top.probability)}
+                    {getExplanation(categorize(top.className))}
                   </div>
                 </div>
               )}
@@ -643,11 +732,10 @@ export default function App() {
         </main>
 
         {/* Stats */}
-        <section className="w-full max-w-4xl mt-6 sm:mt-8 grid grid-cols-2 sm:grid-cols-5 gap-3 fade-up">
+        <section className="w-full max-w-4xl mt-6 sm:mt-8 grid grid-cols-2 sm:grid-cols-4 gap-3 fade-up">
           <StatCard label="Total Scans" value={stats.total} accent="#1f2937" />
           <StatCard label="Fresh" value={stats.fresh} accent="#16a34a" />
-          <StatCard label="Ripe" value={stats.ripe} accent="#f97316" />
-          <StatCard label="Discard" value={stats.rotten} accent="#ef4444" />
+          <StatCard label="Overripe / Discard" value={stats.overripe} accent="#ef4444" />
           <StatCard label="Today" value={stats.todayCount} accent="#6366f1" />
         </section>
 
@@ -662,7 +750,7 @@ export default function App() {
                 <span className="mx-2 text-gray-300">•</span>
                 <span className="font-semibold">Discard rate:</span>{" "}
                 <span className="font-bold text-rose-600">
-                  {stats.total ? ((stats.rotten / stats.total) * 100).toFixed(1) : "0.0"}%
+                  {stats.total ? ((stats.overripe / stats.total) * 100).toFixed(1) : "0.0"}%
                 </span>
               </div>
               {stats.recentDays.length > 0 && (
@@ -715,7 +803,7 @@ export default function App() {
           {/* Filter chips */}
           {history.length > 0 && (
             <div className="flex flex-wrap gap-2 mb-4">
-              {(["all", "fresh", "ripe", "rotten", "other"] as const).map((f) => {
+              {(["all", "fresh", "overripe-discard"] as const).map((f) => {
                 const count =
                   f === "all"
                     ? history.length
@@ -723,6 +811,12 @@ export default function App() {
                 const active = filter === f;
                 const color =
                   f === "all" ? "#1f2937" : categoryColor(f as ScanCategory);
+                const labelText =
+                  f === "all"
+                    ? "All"
+                    : f === "fresh"
+                      ? "Fresh"
+                      : "Overripe/Discard";
                 return (
                   <button
                     key={f}
@@ -734,7 +828,7 @@ export default function App() {
                       borderColor: color + "55",
                     }}
                   >
-                    {f.charAt(0).toUpperCase() + f.slice(1)} ({count})
+                    {labelText} ({count})
                   </button>
                 );
               })}
@@ -771,7 +865,7 @@ export default function App() {
                         className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full text-white"
                         style={{ backgroundColor: categoryColor(r.category) }}
                       >
-                        {r.category}
+                        {categoryLabel(r.category)}
                       </span>
                       <span className="text-xs text-gray-500">
                         {r.source === "camera" ? "📷" : "🖼"} {formatTime(r.timestamp)}
@@ -801,10 +895,11 @@ export default function App() {
           )}
         </section>
 
-        <footer className="w-full max-w-4xl mt-6 sm:mt-8 text-center text-xs text-gray-500">
+        <footer className="w-full max-w-4xl mt-6 sm:mt-8 text-center text-xs text-gray-500 space-y-1">
           <p>
             Built with TensorFlow.js + Teachable Machine. History is saved on this device only.
           </p>
+          <p className="text-gray-400">OptiSort is AI and can make mistakes.</p>
         </footer>
       </div>
     </>
