@@ -1,0 +1,109 @@
+You are an expert frontend + AI integration developer.
+
+Build a complete, clean, working web app called "FreshCheck AI" using HTML, CSS, and JavaScript that integrates a Teachable Machine image classification model.
+
+========================
+🎯 PROJECT GOAL
+========================
+Create a web app where users can:
+1. Open camera OR upload an image
+2. The app uses a Teachable Machine model to classify fruit freshness
+3. Display:
+   - Prediction label (Fresh / Ripe / Rotten etc.)
+   - Confidence %
+   - Simple explanation (based on label)
+
+========================
+🧠 MODEL DETAILS
+========================
+Use this model:
+https://teachablemachine.withgoogle.com/models/Nc5P3SYBJ/
+
+Load using:
+- TensorFlow.js
+- Teachable Machine image library
+
+Model files:
+- model.json
+- metadata.json
+
+Base URL:
+https://teachablemachine.withgoogle.com/models/Nc5P3SYBJ/
+
+========================
+⚙️ TECH STACK
+========================
+- HTML
+- CSS (modern UI)
+- Vanilla JavaScript
+- TensorFlow.js
+- Teachable Machine image library
+
+CDN links required:
+- https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest
+- https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest
+
+========================
+📱 FEATURES
+========================
+1. Camera input (webcam)
+2. Upload image option
+3. Real-time prediction
+4. Show:
+   - Top prediction
+   - Confidence bar
+5. Button: Start / Stop camera
+6. Responsive design (mobile friendly)
+
+========================
+🖥️ UI REQUIREMENTS
+========================
+- Clean modern layout
+- Title: "FreshCheck AI"
+- Camera preview box
+- Result card with:
+   - Label
+   - Confidence %
+- Smooth animations
+
+========================
+📂 FILE STRUCTURE
+========================
+- index.html
+- style.css
+- script.js
+
+========================
+🔧 FUNCTIONAL REQUIREMENTS
+========================
+- Load model on page start
+- Use webcam for live prediction
+- Allow image upload fallback
+- Show prediction continuously (loop)
+- Handle errors gracefully
+
+========================
+🚀 DEPLOYMENT
+========================
+- Must run directly on Replit
+- No backend required
+- Fully client-side
+
+========================
+⚠️ CONSTRAINTS
+========================
+- Code must be beginner-friendly
+- No broken imports
+- Fully working without modification
+
+========================
+💡 EXTRA (IMPORTANT)
+========================
+- Add loading indicator while model loads
+- Show top 2 predictions
+- Add simple logic:
+   If confidence < 60% → show "Not sure"
+
+========================
+
+Now generate complete working code for all files.

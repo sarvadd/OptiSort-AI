@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "DyO_QwwMTYXt2f4u6EfOH"
+uri = "file://artifacts/freshcheck-ai/public/fruits-bg.png"
+type = "image"
+title = "generated_image"

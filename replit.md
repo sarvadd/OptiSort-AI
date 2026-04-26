@@ -25,3 +25,7 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+
+## Artifacts
+
+- `freshcheck-ai` (`/`) — FreshCheck AI: a fruit freshness detector that uses Teachable Machine + TensorFlow.js to classify fruit as fresh / ripe / rotten from camera input or uploaded images. Fully client-side. The TM model URL is hard-coded to `https://teachablemachine.withgoogle.com/models/Nc5P3SYBJ/`. TFJS + TM scripts are loaded via CDN in `index.html`. Background image is `public/fruits-bg.png`.

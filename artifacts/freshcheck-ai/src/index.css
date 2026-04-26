@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+:root {
+  --brand-green: #16a34a;
+  --brand-orange: #f97316;
+  --brand-red: #ef4444;
+  --brand-yellow: #facc15;
+  --brand-pink: #ec4899;
+  --bg-cream: #fff8ef;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: #1f2937;
+}
+
+body {
+  background-color: var(--bg-cream);
+  background-image:
+    linear-gradient(rgba(255, 248, 239, 0.78), rgba(255, 248, 239, 0.92)),
+    url('/fruits-bg.png');
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  min-height: 100vh;
+}
+
+@media (max-width: 640px) {
+  body {
+    background-attachment: scroll;
+  }
+}
