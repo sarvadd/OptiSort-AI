@@ -3,6 +3,94 @@ import { useEffect, useMemo, useRef, useState } from "react";
 declare global {
   interface Window {
     tmImage: any;
+    mobilenet: any;
+  }
+}
+
+// Maps MobileNet (ImageNet) class names to friendly produce names.
+// Longer keys are checked first so multi-word matches win.
+const PRODUCE_KEYWORDS: Record<string, string> = {
+  "granny smith": "apple",
+  "custard apple": "custard apple",
+  "head cabbage": "cabbage",
+  "globe artichoke": "artichoke",
+  "spaghetti squash": "squash",
+  "acorn squash": "squash",
+  "butternut squash": "squash",
+  "bell pepper": "bell pepper",
+  apple: "apple",
+  banana: "banana",
+  orange: "orange",
+  lemon: "lemon",
+  lime: "lime",
+  strawberry: "strawberry",
+  pineapple: "pineapple",
+  ananas: "pineapple",
+  fig: "fig",
+  jackfruit: "jackfruit",
+  pomegranate: "pomegranate",
+  mango: "mango",
+  papaya: "papaya",
+  watermelon: "watermelon",
+  cantaloupe: "cantaloupe",
+  grape: "grape",
+  cherry: "cherry",
+  peach: "peach",
+  pear: "pear",
+  kiwi: "kiwi",
+  blueberry: "blueberry",
+  raspberry: "raspberry",
+  avocado: "avocado",
+  coconut: "coconut",
+  tomato: "tomato",
+  carrot: "carrot",
+  eggplant: "eggplant",
+  broccoli: "broccoli",
+  cauliflower: "cauliflower",
+  cabbage: "cabbage",
+  potato: "potato",
+  corn: "corn",
+  cucumber: "cucumber",
+  cuke: "cucumber",
+  onion: "onion",
+  garlic: "garlic",
+  lettuce: "lettuce",
+  mushroom: "mushroom",
+  zucchini: "zucchini",
+  courgette: "zucchini",
+  squash: "squash",
+  artichoke: "artichoke",
+  asparagus: "asparagus",
+};
+
+const PRODUCE_KEYS_SORTED = Object.keys(PRODUCE_KEYWORDS).sort(
+  (a, b) => b.length - a.length,
+);
+
+function matchProduceKeyword(className: string): string | null {
+  const cls = className.toLowerCase();
+  for (const k of PRODUCE_KEYS_SORTED) {
+    if (cls.includes(k)) return PRODUCE_KEYWORDS[k];
+  }
+  return null;
+}
+
+async function detectProduceType(
+  source: HTMLCanvasElement | HTMLImageElement,
+  mn: any,
+): Promise<string | null> {
+  if (!mn) return null;
+  try {
+    const preds: Array<{ className: string; probability: number }> =
+      await mn.classify(source, 5);
+    for (const p of preds) {
+      const m = matchProduceKeyword(p.className);
+      if (m) return m;
+    }
+    return null;
+  } catch (e) {
+    console.error("MobileNet classify failed", e);
+    return null;
   }
 }
 
@@ -31,6 +119,8 @@ type ScanRecord = {
   label: string;
   confidence: number;
   category: ScanCategory;
+  /** MobileNet-detected fruit/vegetable name (e.g. "apple"). Optional for backward compat. */
+  produceType?: string;
   thumbnail: string;
   source: "camera" | "upload";
   timestamp: number;
@@ -304,6 +394,7 @@ export default function App() {
   }, [sidebarOpen]);
 
   const modelRef = useRef<any>(null);
+  const mobilenetRef = useRef<any>(null);
   const webcamRef = useRef<any>(null);
   const webcamContainerRef = useRef<HTMLDivElement>(null);
   const uploadImgRef = useRef<HTMLImageElement>(null);
@@ -337,6 +428,19 @@ export default function App() {
         if (cancelled) return;
         modelRef.current = model;
         setStatus("ready");
+        // Load MobileNet in background so we can identify what fruit/veg is in frame.
+        // The freshness model only knows fresh/rotten, so we use MobileNet
+        // (an ImageNet classifier) for the produce *type*.
+        if (window.mobilenet) {
+          window.mobilenet
+            .load()
+            .then((mn: any) => {
+              if (!cancelled) mobilenetRef.current = mn;
+            })
+            .catch((err: any) => {
+              console.error("MobileNet failed to load — produce names will be unknown.", err);
+            });
+        }
       } catch (e: any) {
         if (cancelled) return;
         console.error(e);
@@ -451,7 +555,11 @@ export default function App() {
             if (!empty && top && lastUploadAutoSaved.current !== dataUrl) {
               lastUploadAutoSaved.current = dataUrl;
               const thumb = makeThumbnail(uploadImgRef.current);
-              saveScan(top, thumb, "upload");
+              const produceType = await detectProduceType(
+                uploadImgRef.current,
+                mobilenetRef.current,
+              );
+              saveScan(top, thumb, "upload", produceType);
             }
           } catch (e: any) {
             console.error(e);
@@ -473,12 +581,14 @@ export default function App() {
     top: Prediction,
     thumbnail: string,
     source: "camera" | "upload",
+    produceType: string | null,
   ) => {
     const record: ScanRecord = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       label: top.className,
       confidence: top.probability,
       category: categorize(top.className),
+      produceType: produceType || undefined,
       thumbnail,
       source,
       timestamp: Date.now(),
@@ -492,13 +602,17 @@ export default function App() {
     setTimeout(() => setSavedFlash(false), 1500);
   };
 
-  const captureFromCamera = () => {
+  const captureFromCamera = async () => {
     if (!webcamRef.current || nothingToScan) return;
     const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
     const top = sorted[0];
     if (!top) return;
     const thumb = makeThumbnail(webcamRef.current.canvas);
-    saveScan(top, thumb, "camera");
+    const produceType = await detectProduceType(
+      webcamRef.current.canvas,
+      mobilenetRef.current,
+    );
+    saveScan(top, thumb, "camera", produceType);
   };
 
   const removeRecord = (id: string) => {
@@ -574,7 +688,14 @@ export default function App() {
   const produceBreakdown = useMemo<ProduceEntry[]>(() => {
     const map: Record<string, ProduceEntry> = {};
     for (const r of history) {
-      const name = extractProduceName(r.label) || "unknown";
+      // Prefer the MobileNet-detected produce type; fall back to extracting
+      // from the freshness label for older records, or "unknown" if neither.
+      const fallback = extractProduceName(r.label);
+      const isFreshnessOnly = /^(fresh|rotten|ripe|overripe|nothing|spoiled|good|bad)$/i.test(
+        fallback,
+      );
+      const name =
+        r.produceType || (isFreshnessOnly ? "unknown" : fallback) || "unknown";
       if (!map[name]) {
         map[name] = {
           name,
