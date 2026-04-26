@@ -87,17 +87,6 @@ function lastNDayKeys(n: number): string[] {
   return arr;
 }
 
-const TIME_BUCKETS = ["Morning", "Afternoon", "Evening", "Night"] as const;
-type TimeBucket = (typeof TIME_BUCKETS)[number];
-
-function timeBucket(ts: number): TimeBucket {
-  const h = new Date(ts).getHours();
-  if (h >= 6 && h < 12) return "Morning";
-  if (h >= 12 && h < 17) return "Afternoon";
-  if (h >= 17 && h < 21) return "Evening";
-  return "Night";
-}
-
 const FRUIT_EMOJI_MAP: Record<string, string> = {
   apple: "🍎",
   banana: "🍌",
@@ -152,10 +141,9 @@ function extractProduceName(label: string): string {
 type ProduceEntry = {
   name: string;
   total: number;
-  fresh: number;
-  overripe: number;
   days: Record<string, number>;
-  times: Record<TimeBucket, number>;
+  // All scan timestamps for this produce (used for hourly drill-down)
+  timestamps: number[];
   last: number;
 };
 
@@ -591,20 +579,16 @@ export default function App() {
         map[name] = {
           name,
           total: 0,
-          fresh: 0,
-          overripe: 0,
           days: {},
-          times: { Morning: 0, Afternoon: 0, Evening: 0, Night: 0 },
+          timestamps: [],
           last: 0,
         };
       }
       const e = map[name];
       e.total++;
-      if (r.category === "fresh") e.fresh++;
-      else e.overripe++;
       const dk = dayKey(r.timestamp);
       e.days[dk] = (e.days[dk] || 0) + 1;
-      e.times[timeBucket(r.timestamp)]++;
+      e.timestamps.push(r.timestamp);
       if (r.timestamp > e.last) e.last = r.timestamp;
     }
     return Object.values(map).sort((a, b) => b.total - a.total);
@@ -1095,14 +1079,131 @@ export default function App() {
   );
 }
 
+function HourlyLineChart({
+  hourly,
+  dayLabel,
+}: {
+  hourly: number[];
+  dayLabel: string;
+}) {
+  const W = 280;
+  const H = 110;
+  const padL = 24;
+  const padR = 8;
+  const padT = 10;
+  const padB = 22;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const max = Math.max(1, ...hourly);
+  const points = hourly.map((c, i) => {
+    const x = padL + (i / 23) * innerW;
+    const y = padT + innerH - (c / max) * innerH;
+    return [x, y] as const;
+  });
+  const path = points.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x},${y}`).join(" ");
+  const area = `${path} L${padL + innerW},${padT + innerH} L${padL},${padT + innerH} Z`;
+  // y-axis ticks (0, mid, max)
+  const yTicks = [0, Math.ceil(max / 2), max];
+  return (
+    <div>
+      <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-1">
+        {dayLabel} · scans by hour
+      </p>
+      <div className="bg-white rounded-lg border border-gray-200 p-2">
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-auto">
+          {/* grid lines */}
+          {yTicks.map((t) => {
+            const y = padT + innerH - (t / max) * innerH;
+            return (
+              <g key={t}>
+                <line
+                  x1={padL}
+                  y1={y}
+                  x2={W - padR}
+                  y2={y}
+                  stroke="#e5e7eb"
+                  strokeDasharray="2 3"
+                />
+                <text
+                  x={padL - 4}
+                  y={y + 3}
+                  textAnchor="end"
+                  fontSize="9"
+                  fill="#9ca3af"
+                >
+                  {t}
+                </text>
+              </g>
+            );
+          })}
+          {/* x-axis labels (every 4 hours) */}
+          {[0, 4, 8, 12, 16, 20].map((h) => {
+            const x = padL + (h / 23) * innerW;
+            return (
+              <text
+                key={h}
+                x={x}
+                y={H - 6}
+                textAnchor="middle"
+                fontSize="9"
+                fill="#9ca3af"
+              >
+                {h.toString().padStart(2, "0")}
+              </text>
+            );
+          })}
+          {/* area + line */}
+          <path d={area} fill="rgba(16, 185, 129, 0.15)" />
+          <path
+            d={path}
+            fill="none"
+            stroke="#16a34a"
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+          {/* points */}
+          {points.map(([x, y], i) =>
+            hourly[i] > 0 ? (
+              <circle key={i} cx={x} cy={y} r="2.5" fill="#16a34a">
+                <title>{`${i.toString().padStart(2, "0")}:00 — ${hourly[i]} scan${hourly[i] === 1 ? "" : "s"}`}</title>
+              </circle>
+            ) : null,
+          )}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 function ProduceCard({ produce }: { produce: ProduceEntry }) {
   const [expanded, setExpanded] = useState(false);
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+
   const last7 = lastNDayKeys(7).map((d) => ({
     day: d,
     count: produce.days[d] || 0,
   }));
   const maxDay = Math.max(1, ...last7.map((d) => d.count));
-  const maxTime = Math.max(1, ...TIME_BUCKETS.map((t) => produce.times[t] || 0));
+
+  const hourly = useMemo<number[]>(() => {
+    if (!selectedDay) return [];
+    const buckets = new Array(24).fill(0);
+    for (const ts of produce.timestamps) {
+      if (dayKey(ts) === selectedDay) {
+        buckets[new Date(ts).getHours()]++;
+      }
+    }
+    return buckets;
+  }, [selectedDay, produce.timestamps]);
+
+  const dayLabel = selectedDay
+    ? new Date(selectedDay + "T00:00:00").toLocaleDateString(undefined, {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      })
+    : "";
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
@@ -1118,14 +1219,11 @@ function ProduceCard({ produce }: { produce: ProduceEntry }) {
           <p className="font-semibold text-gray-900 truncate capitalize">
             {produce.name}
           </p>
-          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-bold">
-              {produce.fresh} fresh
-            </span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-bold">
-              {produce.overripe} discard
-            </span>
-          </div>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {produce.total} scan{produce.total === 1 ? "" : "s"} ·{" "}
+            {Object.keys(produce.days).length} day
+            {Object.keys(produce.days).length === 1 ? "" : "s"}
+          </p>
         </div>
         <div className="text-right flex-shrink-0">
           <p className="text-2xl font-extrabold text-gray-900 tabular-nums leading-none">
@@ -1135,62 +1233,66 @@ function ProduceCard({ produce }: { produce: ProduceEntry }) {
         </div>
       </button>
       {expanded && (
-        <div className="p-3 border-t border-gray-100 bg-gray-50/60 space-y-4">
+        <div className="p-3 border-t border-gray-100 bg-gray-50/60 space-y-3">
           <div>
-            <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">
-              Last 7 days
-            </p>
-            <div className="flex items-end gap-1 h-20">
-              {last7.map((d) => (
-                <div
-                  key={d.day}
-                  className="flex-1 flex flex-col items-center gap-1 min-w-0"
-                  title={`${d.day}: ${d.count}`}
-                >
-                  <span className="text-[10px] font-bold text-gray-700 tabular-nums">
-                    {d.count || ""}
-                  </span>
-                  <div className="w-full flex items-end h-12 bg-white rounded-sm">
-                    <div
-                      className="w-full rounded-sm bg-gradient-to-t from-emerald-500 to-emerald-400"
-                      style={{
-                        height: `${Math.max(d.count > 0 ? 8 : 0, (d.count / maxDay) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                  <span className="text-[10px] text-gray-500 tabular-nums">
-                    {d.day.slice(8)}
-                  </span>
-                </div>
-              ))}
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500">
+                Last 7 days
+              </p>
+              <p className="text-[10px] text-gray-400 italic">tap a bar</p>
             </div>
-          </div>
-          <div>
-            <p className="text-[10px] uppercase tracking-wider font-bold text-gray-500 mb-2">
-              Time of day
-            </p>
-            <div className="space-y-1.5">
-              {TIME_BUCKETS.map((t) => {
-                const c = produce.times[t] || 0;
+            <div className="flex items-end gap-1 h-24">
+              {last7.map((d) => {
+                const isSelected = selectedDay === d.day;
+                const isToday = d.day === dayKey(Date.now());
                 return (
-                  <div key={t} className="flex items-center gap-2">
-                    <span className="text-xs text-gray-600 w-20 flex-shrink-0">
-                      {t}
+                  <button
+                    key={d.day}
+                    onClick={() =>
+                      setSelectedDay((cur) =>
+                        cur === d.day ? null : d.count > 0 ? d.day : cur,
+                      )
+                    }
+                    disabled={d.count === 0}
+                    className={`flex-1 flex flex-col items-center gap-1 min-w-0 rounded transition-all ${
+                      d.count > 0
+                        ? "cursor-pointer hover:opacity-80"
+                        : "cursor-not-allowed opacity-60"
+                    }`}
+                    title={`${d.day}: ${d.count} scan${d.count === 1 ? "" : "s"}`}
+                  >
+                    <span className="text-[10px] font-bold text-gray-700 tabular-nums h-3">
+                      {d.count || ""}
                     </span>
-                    <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="w-full flex items-end h-14 bg-white rounded-sm border border-gray-200">
                       <div
-                        className="h-full bg-gradient-to-r from-orange-400 to-orange-500 rounded-full transition-all"
-                        style={{ width: `${(c / maxTime) * 100}%` }}
+                        className={`w-full rounded-sm transition-all ${
+                          isSelected
+                            ? "bg-gradient-to-t from-emerald-700 to-emerald-500 ring-2 ring-emerald-300"
+                            : "bg-gradient-to-t from-emerald-500 to-emerald-400"
+                        }`}
+                        style={{
+                          height: `${Math.max(d.count > 0 ? 8 : 0, (d.count / maxDay) * 100)}%`,
+                        }}
                       />
                     </div>
-                    <span className="text-xs font-bold text-gray-700 w-6 text-right tabular-nums">
-                      {c}
+                    <span
+                      className={`text-[10px] tabular-nums ${isToday ? "font-bold text-emerald-700" : "text-gray-500"}`}
+                    >
+                      {d.day.slice(8)}
                     </span>
-                  </div>
+                  </button>
                 );
               })}
             </div>
           </div>
+
+          {selectedDay && (
+            <div className="fade-up">
+              <HourlyLineChart hourly={hourly} dayLabel={dayLabel} />
+            </div>
+          )}
+
           <p className="text-[10px] text-gray-500 text-center pt-1">
             Last scan: {formatTime(produce.last)}
           </p>
